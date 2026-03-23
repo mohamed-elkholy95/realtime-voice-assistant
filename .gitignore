@@ -19,3 +19,4 @@ metrics/
 *.log
 .idea/
 .vscode/
+.venv/
