@@ -441,6 +441,128 @@ class VoiceAssistant:
         self.analytics.reset()
         logger.info("Analytics reset")
 
+    def export_conversation(self, format: str = "markdown") -> str:
+        """Export the current conversation history in a structured format.
+
+        Conversation logging is important for:
+        - **Debugging**: Reviewing what the assistant understood and how
+          it responded to identify classification or response errors.
+        - **Training data**: Exported conversations can be annotated and
+          used to train supervised intent classifiers.
+        - **Analytics**: Understanding user interaction patterns, common
+          intents, and conversation flow.
+        - **Compliance**: Some applications require conversation logging
+          for audit trails.
+
+        Args:
+            format: Export format. Supported formats:
+                - 'markdown': Human-readable Markdown with headers and
+                  intent annotations.
+                - 'jsonl': JSON Lines format (one JSON object per turn),
+                  suitable for ML training pipelines.
+                - 'csv': Comma-separated values for spreadsheet analysis.
+
+        Returns:
+            Formatted string containing the conversation history.
+
+        Raises:
+            ValueError: If an unsupported format is specified.
+
+        Example:
+            >>> va = VoiceAssistant()
+            >>> va.process_text("Hello!")
+            {...}
+            >>> print(va.export_conversation("markdown"))
+            # Conversation Export
+            ...
+        """
+        history = self.context.history
+        supported_formats = {"markdown", "jsonl", "csv"}
+
+        if format not in supported_formats:
+            raise ValueError(
+                f"Unsupported format '{format}'. "
+                f"Choose from: {', '.join(sorted(supported_formats))}"
+            )
+
+        if format == "markdown":
+            return self._export_markdown(history)
+        elif format == "jsonl":
+            return self._export_jsonl(history)
+        else:
+            return self._export_csv(history)
+
+    def _export_markdown(self, history: List[Dict[str, str]]) -> str:
+        """Export conversation as readable Markdown."""
+        import datetime
+
+        lines = [
+            "# Conversation Export",
+            f"\n**Exported:** {datetime.datetime.now().isoformat()}",
+            f"**Turns:** {self.context.turn_count}",
+            "",
+            "---",
+            "",
+        ]
+
+        for turn in history:
+            role = turn.get("role", "unknown")
+            content = turn.get("content", "")
+            intent = turn.get("intent", "")
+
+            if role == "user":
+                lines.append(f"**🧑 User:** {content}")
+                if intent:
+                    lines.append(f"  *Intent: {intent}*")
+            else:
+                lines.append(f"**🤖 Assistant:** {content}")
+            lines.append("")
+
+        # Append analytics summary
+        summary = self.analytics.get_summary()
+        if summary["total_classifications"] > 0:
+            lines.extend([
+                "---",
+                "",
+                "## Session Analytics",
+                "",
+                f"- **Total classifications:** {summary['total_classifications']}",
+                f"- **Unique intents:** {summary['unique_intents']}",
+                f"- **Most common:** {summary['most_common_intent']} "
+                f"({summary['most_common_count']} times)",
+            ])
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _export_jsonl(history: List[Dict[str, str]]) -> str:
+        """Export conversation as JSON Lines (one JSON object per line)."""
+        import json
+
+        lines = []
+        for idx, turn in enumerate(history):
+            record = {
+                "turn_index": idx,
+                "role": turn.get("role", "unknown"),
+                "content": turn.get("content", ""),
+            }
+            if "intent" in turn:
+                record["intent"] = turn["intent"]
+            lines.append(json.dumps(record, ensure_ascii=False))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _export_csv(history: List[Dict[str, str]]) -> str:
+        """Export conversation as CSV with header row."""
+        lines = ["turn_index,role,intent,content"]
+        for idx, turn in enumerate(history):
+            role = turn.get("role", "unknown")
+            intent = turn.get("intent", "")
+            # Escape content for CSV: double-quote fields containing commas
+            content = turn.get("content", "").replace('"', '""')
+            lines.append(f'{idx},{role},{intent},"{content}"')
+        return "\n".join(lines)
+
     @property
     def stt_loaded(self) -> bool:
         """Check if the STT model is loaded (not in mock mode)."""
