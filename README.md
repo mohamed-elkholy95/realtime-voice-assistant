@@ -16,15 +16,19 @@
 
 This project demonstrates core speech processing concepts with **real implementations** (not just mocks):
 
-- **DSP Fundamentals**: FFT, STFT, Mel filter banks, DCT, pre-emphasis
-- **Feature Extraction**: Real MFCC computation using scipy (DFT → Mel → log → DCT)
+- **DSP Fundamentals**: FFT, STFT, Mel filter banks, DCT, pre-emphasis, SNR estimation
+- **Feature Extraction**: Real MFCC computation using scipy (DFT → Mel → log → DCT), plus delta and delta-delta temporal features
 - **Voice Activity Detection**: Energy-based silence detection and speech segmentation
 - **Intent Classification**: Multi-strategy pipeline (keyword + regex + fuzzy matching)
 - **Speech Recognition**: Whisper integration with audio preprocessing
 - **Speech Synthesis**: TTS with rate control, pitch scaling, and SSML stubs
-- **Evaluation Metrics**: WER via Levenshtein dynamic programming, CER, intent accuracy
-- **API Design**: RESTful API with Pydantic validation and 7 endpoints
+- **Evaluation Metrics**: WER via Levenshtein dynamic programming, CER, intent accuracy, confusion matrix with per-class precision/recall/F1
+- **Streaming ASR**: Chunk-based transcription with overlap handling for real-time audio streams
+- **Audio Quality**: Signal-to-Noise Ratio estimation using VAD-based speech/silence segmentation
+- **API Design**: RESTful API with Pydantic validation, token bucket rate limiting, and 9 endpoints
 - **Visualization**: Interactive Streamlit dashboard with 5 pages
+
+> 📖 New to speech processing? Check out the **[Glossary](GLOSSARY.md)** for definitions of all key terms used in this project.
 
 ## 🏗️ Architecture
 
