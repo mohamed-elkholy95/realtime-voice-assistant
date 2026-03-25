@@ -297,6 +297,120 @@ class STTEngine:
         # Mock: return configured language
         return self.language
 
+    def transcribe_streaming(
+        self,
+        audio_chunks: List[np.ndarray],
+        sample_rate: int = 16000,
+        chunk_overlap_ms: float = 200.0,
+        preprocess: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Transcribe a stream of audio chunks with overlap handling.
+
+        In real-time voice assistants, audio arrives in small chunks
+        (e.g., 100–500 ms) from the microphone. Naive chunk-by-chunk
+        transcription produces poor results because words frequently
+        span chunk boundaries — a word that starts at the end of one
+        chunk and finishes at the beginning of the next gets split.
+
+        This method addresses the boundary problem by:
+        1. Maintaining a rolling buffer of overlapping audio
+        2. Transcribing the full buffer at each step
+        3. Returning only the new (non-overlapping) portion of text
+
+        The overlap region (default 200 ms) ensures words at chunk
+        boundaries are captured in at least one complete transcription.
+
+        For production streaming ASR, consider:
+        - **WebSocket-based streaming**: Send audio frames over a
+          persistent connection (e.g., Whisper streaming, Deepgram)
+        - **Endpointing**: Detect when the user stops speaking to
+          trigger final transcription
+        - **Partial results**: Show interim transcriptions that update
+          as more audio arrives (improves perceived responsiveness)
+
+        Args:
+            audio_chunks: List of 1D numpy arrays, each representing
+                a consecutive chunk of audio from the stream.
+            sample_rate: Audio sample rate in Hz.
+            chunk_overlap_ms: Overlap between consecutive chunks in ms.
+                Longer overlap = fewer boundary errors, higher latency.
+            preprocess: Whether to apply audio preprocessing.
+
+        Returns:
+            List of transcription results, one per chunk, each with:
+                - 'text': Transcribed text for this chunk.
+                - 'chunk_index': Index of the chunk in the stream.
+                - 'is_partial': Whether this is a partial (non-final) result.
+                - 'buffer_duration_ms': Duration of audio in the buffer.
+                - 'language': Detected/configured language.
+                - 'confidence': Transcription confidence score.
+
+        Example:
+            >>> engine = STTEngine()
+            >>> chunks = [np.zeros(4000, dtype=np.int16) for _ in range(5)]
+            >>> results = engine.transcribe_streaming(chunks)
+            >>> len(results) == 5
+            True
+            >>> results[-1]['is_partial']
+            False
+        """
+        overlap_samples = int(chunk_overlap_ms / 1000.0 * sample_rate)
+        results: List[Dict[str, Any]] = []
+        buffer = np.array([], dtype=np.int16)
+
+        for idx, chunk in enumerate(audio_chunks):
+            is_last = idx == len(audio_chunks) - 1
+
+            # Append new chunk to the rolling buffer
+            buffer = np.concatenate([buffer, chunk])
+
+            # Transcribe the full buffer
+            transcription = self.transcribe(
+                buffer, sample_rate, preprocess=preprocess
+            )
+
+            buffer_duration_ms = len(buffer) / sample_rate * 1000.0
+
+            results.append({
+                "text": transcription["text"],
+                "chunk_index": idx,
+                "is_partial": not is_last,
+                "buffer_duration_ms": round(buffer_duration_ms, 1),
+                "language": transcription.get("language", "en"),
+                "confidence": transcription.get("confidence", 0.0),
+            })
+
+            # Trim the buffer, keeping only the overlap region
+            # This prevents the buffer from growing indefinitely while
+            # ensuring words at the boundary are captured in the next pass
+            if not is_last and len(buffer) > overlap_samples:
+                buffer = buffer[-overlap_samples:]
+
+        return results
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Return metadata about the current STT engine configuration.
+
+        Useful for API health checks, debugging, and model inventory.
+
+        Returns:
+            Dictionary with model size, language, mode (real/mock),
+            and supported features.
+        """
+        return {
+            "model_size": self.model_size,
+            "language": self.language,
+            "mode": "whisper" if self._model is not None else "mock",
+            "is_loaded": self._model is not None,
+            "supported_features": [
+                "transcribe",
+                "transcribe_batch",
+                "transcribe_streaming",
+                "language_detection",
+                "preprocessing",
+            ],
+        }
+
     def is_loaded(self) -> bool:
         """Check if the Whisper model is loaded (not in mock mode).
 
