@@ -1050,6 +1050,153 @@ def compute_mfcc_with_deltas(
     return np.vstack(feature_stack)
 
 
+def estimate_snr(
+    audio: np.ndarray,
+    sample_rate: int = SAMPLE_RATE,
+    frame_duration_ms: float = 25.0,
+    frame_step_ms: float = 10.0,
+    silence_threshold_db: float = -40.0,
+) -> Dict[str, float]:
+    """Estimate the Signal-to-Noise Ratio (SNR) of an audio signal.
+
+    SNR measures how much louder the desired signal (speech) is compared
+    to the background noise. It is defined as:
+
+        SNR = 10 * log10(P_signal / P_noise)   [in dB]
+
+    where P_signal and P_noise are the average power of the speech and
+    noise segments respectively. Higher SNR means cleaner audio:
+
+    - **>40 dB**: Studio-quality recording
+    - **20-40 dB**: Good quality, typical quiet room
+    - **10-20 dB**: Noisy environment, ASR accuracy starts degrading
+    - **<10 dB**: Very noisy, significant ASR degradation expected
+
+    This function estimates SNR by:
+    1. Running Voice Activity Detection to classify frames as speech/silence
+    2. Computing the mean power of speech frames (signal + noise)
+    3. Computing the mean power of silence frames (noise only)
+    4. SNR ≈ 10 * log10(P_speech / P_silence)
+
+    This is an approximation because silence frames contain only noise,
+    while speech frames contain signal + noise. For a more precise estimate,
+    spectral subtraction or NIST WADA-SNR methods would be needed.
+
+    Args:
+        audio: 1D numpy array of audio samples.
+        sample_rate: Audio sample rate in Hz.
+        frame_duration_ms: Frame length in milliseconds for VAD.
+        frame_step_ms: Hop between frames in milliseconds.
+        silence_threshold_db: Energy threshold for speech/silence classification.
+
+    Returns:
+        Dictionary containing:
+            - 'snr_db': Estimated SNR in decibels.
+            - 'signal_power_db': Average power of speech frames in dB.
+            - 'noise_power_db': Average power of silence frames in dB.
+            - 'speech_ratio': Fraction of frames classified as speech.
+            - 'n_speech_frames': Number of speech frames found.
+            - 'n_silence_frames': Number of silence frames found.
+
+    Example:
+        >>> audio = generate_speech_like_audio(duration=2.0)
+        >>> snr = estimate_snr(audio)
+        >>> 'snr_db' in snr
+        True
+        >>> snr['speech_ratio'] >= 0.0
+        True
+    """
+    if len(audio) == 0:
+        return {
+            "snr_db": 0.0,
+            "signal_power_db": -100.0,
+            "noise_power_db": -100.0,
+            "speech_ratio": 0.0,
+            "n_speech_frames": 0,
+            "n_silence_frames": 0,
+        }
+
+    float_audio = audio.astype(np.float64)
+
+    # Use VAD to separate speech and silence frames
+    vad_results = detect_silence(
+        audio,
+        sample_rate=sample_rate,
+        frame_duration_ms=frame_duration_ms,
+        frame_step_ms=frame_step_ms,
+        threshold_db=silence_threshold_db,
+    )
+
+    if not vad_results:
+        return {
+            "snr_db": 0.0,
+            "signal_power_db": -100.0,
+            "noise_power_db": -100.0,
+            "speech_ratio": 0.0,
+            "n_speech_frames": 0,
+            "n_silence_frames": 0,
+        }
+
+    # Compute frame-level power from the VAD energy values
+    speech_energies = []
+    silence_energies = []
+
+    for result in vad_results:
+        # Convert dB back to linear power: P = 10^(dB/10)
+        linear_power = 10.0 ** (result["energy_db"] / 10.0)
+        if result["is_speech"]:
+            speech_energies.append(linear_power)
+        else:
+            silence_energies.append(linear_power)
+
+    n_speech = len(speech_energies)
+    n_silence = len(silence_energies)
+    total_frames = n_speech + n_silence
+    speech_ratio = n_speech / total_frames if total_frames > 0 else 0.0
+
+    epsilon = 1e-10  # Floor to avoid log(0)
+
+    if n_speech == 0:
+        # No speech detected — can't compute meaningful SNR
+        noise_power = np.mean(silence_energies) if silence_energies else epsilon
+        return {
+            "snr_db": 0.0,
+            "signal_power_db": -100.0,
+            "noise_power_db": round(10.0 * np.log10(noise_power + epsilon), 2),
+            "speech_ratio": 0.0,
+            "n_speech_frames": 0,
+            "n_silence_frames": n_silence,
+        }
+
+    if n_silence == 0:
+        # All speech, no silence reference — estimate noise floor
+        # Use the lowest 10% of speech frame energies as noise estimate
+        sorted_energies = sorted(speech_energies)
+        noise_count = max(1, len(sorted_energies) // 10)
+        noise_power = np.mean(sorted_energies[:noise_count])
+    else:
+        noise_power = np.mean(silence_energies)
+
+    signal_power = np.mean(speech_energies)
+
+    # Ensure noise power is positive for valid SNR computation
+    noise_power = max(noise_power, epsilon)
+    signal_power = max(signal_power, epsilon)
+
+    snr_db = 10.0 * np.log10(signal_power / noise_power)
+    signal_power_db = 10.0 * np.log10(signal_power)
+    noise_power_db = 10.0 * np.log10(noise_power)
+
+    return {
+        "snr_db": round(float(snr_db), 2),
+        "signal_power_db": round(float(signal_power_db), 2),
+        "noise_power_db": round(float(noise_power_db), 2),
+        "speech_ratio": round(speech_ratio, 4),
+        "n_speech_frames": n_speech,
+        "n_silence_frames": n_silence,
+    }
+
+
 def apply_preemphasis(audio: np.ndarray, coeff: float = 0.97) -> np.ndarray:
     """Apply a first-order pre-emphasis filter to audio.
 
