@@ -285,6 +285,153 @@ def compute_intent_accuracy(
     return correct / len(references)
 
 
+def compute_confusion_matrix(
+    references: List[str],
+    predictions: List[str],
+    labels: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Compute a confusion matrix for intent classification evaluation.
+
+    A confusion matrix is a table that visualizes classifier performance
+    by showing how often each true label was predicted as each possible
+    label. It reveals:
+
+    - **True Positives (diagonal)**: Correctly classified instances
+    - **False Positives (column sums minus diagonal)**: Instances wrongly
+      assigned to this class
+    - **False Negatives (row sums minus diagonal)**: Instances of this
+      class that were missed
+
+    From the confusion matrix, per-class precision, recall, and F1 score
+    can be derived:
+
+    - **Precision** = TP / (TP + FP) — "Of all predictions for this class,
+      how many were correct?" High precision means few false alarms.
+    - **Recall** = TP / (TP + FN) — "Of all actual instances of this class,
+      how many did we find?" High recall means few missed detections.
+    - **F1 Score** = 2 * (precision * recall) / (precision + recall) —
+      Harmonic mean of precision and recall, balancing both concerns.
+
+    Args:
+        references: List of ground-truth labels.
+        predictions: List of predicted labels (same length as references).
+        labels: Optional ordered list of label names. If None, labels are
+            inferred from the union of references and predictions, sorted
+            alphabetically.
+
+    Returns:
+        Dictionary containing:
+            - 'matrix': 2D list (n_labels × n_labels) of counts.
+            - 'labels': Ordered list of label names (row/column headers).
+            - 'per_class': Dict mapping each label to precision, recall, f1.
+            - 'macro_precision': Macro-averaged precision across all classes.
+            - 'macro_recall': Macro-averaged recall across all classes.
+            - 'macro_f1': Macro-averaged F1 score across all classes.
+            - 'accuracy': Overall classification accuracy.
+
+    Raises:
+        ValueError: If references and predictions have different lengths.
+
+    Example:
+        >>> refs = ["weather", "weather", "time", "music", "time"]
+        >>> preds = ["weather", "time", "time", "music", "weather"]
+        >>> result = compute_confusion_matrix(refs, preds)
+        >>> result['accuracy']
+        0.6
+        >>> result['per_class']['weather']['precision']  # 1 correct / 2 predicted
+        0.5
+    """
+    if len(references) != len(predictions):
+        raise ValueError(
+            f"Length mismatch: {len(references)} references vs "
+            f"{len(predictions)} predictions"
+        )
+
+    if not references:
+        return {
+            "matrix": [],
+            "labels": [],
+            "per_class": {},
+            "macro_precision": 0.0,
+            "macro_recall": 0.0,
+            "macro_f1": 0.0,
+            "accuracy": 0.0,
+        }
+
+    # Determine label ordering
+    if labels is None:
+        labels = sorted(set(references) | set(predictions))
+
+    label_to_idx = {label: idx for idx, label in enumerate(labels)}
+    n_labels = len(labels)
+
+    # Build the confusion matrix
+    matrix = [[0] * n_labels for _ in range(n_labels)]
+    for ref, pred in zip(references, predictions):
+        ref_idx = label_to_idx.get(ref)
+        pred_idx = label_to_idx.get(pred)
+        if ref_idx is not None and pred_idx is not None:
+            matrix[ref_idx][pred_idx] += 1
+
+    # Compute per-class metrics
+    per_class: Dict[str, Dict[str, float]] = {}
+    total_correct = 0
+
+    for i, label in enumerate(labels):
+        tp = matrix[i][i]
+        total_correct += tp
+
+        # FP = other classes predicted as this class (column sum minus diagonal)
+        fp = sum(matrix[row][i] for row in range(n_labels)) - tp
+        # FN = this class predicted as other classes (row sum minus diagonal)
+        fn = sum(matrix[i][col] for col in range(n_labels)) - tp
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (
+            2.0 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+
+        per_class[label] = {
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1": round(f1, 4),
+            "support": sum(matrix[i]),  # Total actual instances of this class
+        }
+
+    # Macro-averaged metrics (unweighted mean across classes)
+    n_active = sum(1 for m in per_class.values() if m["support"] > 0)
+    macro_precision = (
+        sum(m["precision"] for m in per_class.values() if m["support"] > 0) / n_active
+        if n_active > 0
+        else 0.0
+    )
+    macro_recall = (
+        sum(m["recall"] for m in per_class.values() if m["support"] > 0) / n_active
+        if n_active > 0
+        else 0.0
+    )
+    macro_f1 = (
+        sum(m["f1"] for m in per_class.values() if m["support"] > 0) / n_active
+        if n_active > 0
+        else 0.0
+    )
+
+    accuracy = total_correct / len(references)
+
+    return {
+        "matrix": matrix,
+        "labels": labels,
+        "per_class": per_class,
+        "macro_precision": round(macro_precision, 4),
+        "macro_recall": round(macro_recall, 4),
+        "macro_f1": round(macro_f1, 4),
+        "accuracy": round(accuracy, 4),
+    }
+
+
 def benchmark_latency(
     fn,
     num_runs: int = 10,
