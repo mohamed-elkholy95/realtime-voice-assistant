@@ -495,6 +495,35 @@ async def get_history() -> HistoryResponse:
     )
 
 
+@app.get("/export")
+async def export_conversation(format: str = "markdown") -> Dict[str, str]:
+    """Export the current conversation in the specified format.
+
+    Useful for saving conversation logs, generating training data,
+    or creating reports from voice assistant interactions.
+
+    Supported formats:
+    - 'markdown': Human-readable with intent annotations
+    - 'jsonl': JSON Lines for ML training pipelines
+    - 'csv': Spreadsheet-compatible tabular format
+
+    Args:
+        format: Output format (query parameter, default: 'markdown').
+
+    Returns:
+        Dictionary with 'format' and 'content' keys.
+    """
+    try:
+        assistant = _get_assistant()
+        content = assistant.export_conversation(format=format)
+        return {"format": format, "content": content}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("Export endpoint error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Export error: {exc}")
+
+
 @app.get("/analytics")
 async def get_analytics() -> Dict[str, Any]:
     """Get intent classification analytics.
