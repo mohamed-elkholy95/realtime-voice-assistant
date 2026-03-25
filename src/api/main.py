@@ -21,14 +21,104 @@ Educational Context:
 """
 
 import logging
+import time
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+# ── Rate Limiting ──────────────────────────────────────────────────────────
+# Token bucket algorithm: each client gets a bucket of tokens that refills
+# at a constant rate. Each request consumes one token. When the bucket is
+# empty, requests are rejected with HTTP 429 (Too Many Requests).
+#
+# This is the most common rate limiting algorithm because it allows short
+# bursts (up to bucket capacity) while enforcing a long-term average rate.
+# Alternatives include:
+# - Sliding window: More precise but higher memory overhead
+# - Leaky bucket: Smoother output rate, no bursts allowed
+# - Fixed window: Simpler but allows burst at window boundaries
+
+
+class TokenBucketRateLimiter:
+    """In-memory token bucket rate limiter keyed by client IP.
+
+    Each client IP address gets an independent token bucket. Tokens
+    refill at a constant rate (refill_rate tokens per second) up to
+    a maximum capacity. Each request consumes one token.
+
+    This implementation is suitable for single-process deployments.
+    For multi-process or distributed deployments, use Redis-backed
+    rate limiting (e.g., redis + lua scripts for atomic operations).
+
+    Attributes:
+        capacity: Maximum tokens a bucket can hold (burst limit).
+        refill_rate: Tokens added per second (sustained rate limit).
+        _buckets: Per-client token counts.
+        _last_refill: Per-client last refill timestamps.
+
+    Example:
+        >>> limiter = TokenBucketRateLimiter(capacity=5, refill_rate=1.0)
+        >>> limiter.allow("192.168.1.1")  # First request
+        True
+    """
+
+    def __init__(
+        self,
+        capacity: int = 60,
+        refill_rate: float = 10.0,
+    ) -> None:
+        """Initialize the rate limiter.
+
+        Args:
+            capacity: Maximum burst size (tokens per bucket).
+                60 tokens means a client can make 60 requests instantly.
+            refill_rate: Tokens per second added to each bucket.
+                10.0 means 10 requests/second sustained rate.
+        """
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self._buckets: Dict[str, float] = defaultdict(lambda: float(capacity))
+        self._last_refill: Dict[str, float] = defaultdict(time.monotonic)
+
+    def allow(self, client_id: str) -> bool:
+        """Check if a request from this client should be allowed.
+
+        Refills the client's bucket based on elapsed time, then
+        attempts to consume one token.
+
+        Args:
+            client_id: Unique client identifier (typically IP address).
+
+        Returns:
+            True if the request is allowed, False if rate limited.
+        """
+        now = time.monotonic()
+        elapsed = now - self._last_refill[client_id]
+
+        # Refill tokens based on elapsed time
+        self._buckets[client_id] = min(
+            self.capacity,
+            self._buckets[client_id] + elapsed * self.refill_rate,
+        )
+        self._last_refill[client_id] = now
+
+        # Try to consume one token
+        if self._buckets[client_id] >= 1.0:
+            self._buckets[client_id] -= 1.0
+            return True
+        return False
+
+
+# Global rate limiter instance
+_rate_limiter = TokenBucketRateLimiter(capacity=60, refill_rate=10.0)
 
 app = FastAPI(
     title="Voice Assistant API",
@@ -46,6 +136,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Apply token bucket rate limiting per client IP.
+
+    Rate limiting protects the API from abuse and ensures fair usage:
+    - Prevents a single client from monopolizing server resources
+    - Protects expensive operations (STT/TTS model inference)
+    - Returns standard HTTP 429 with Retry-After header
+
+    The client IP is extracted from X-Forwarded-For (when behind a
+    reverse proxy) or falls back to the direct connection IP.
+    """
+    # Extract client IP — check proxy headers first
+    forwarded = request.headers.get("X-Forwarded-For")
+    client_ip = forwarded.split(",")[0].strip() if forwarded else (
+        request.client.host if request.client else "unknown"
+    )
+
+    # Skip rate limiting for health checks (monitoring should never be blocked)
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    if not _rate_limiter.allow(client_ip):
+        logger.warning("Rate limited client: %s on %s", client_ip, request.url.path)
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": "Too many requests. Please slow down.",
+                "retry_after_seconds": 1.0 / _rate_limiter.refill_rate,
+            },
+            headers={"Retry-After": str(int(1.0 / _rate_limiter.refill_rate))},
+        )
+
+    return await call_next(request)
 
 
 # ── Request/Response Models ────────────────────────────────────────────────
