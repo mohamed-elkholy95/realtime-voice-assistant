@@ -892,6 +892,164 @@ def compute_log_mel_spectrogram(
     return log_mel.T
 
 
+def compute_delta_features(
+    features: np.ndarray,
+    width: int = 2,
+) -> np.ndarray:
+    """Compute delta (velocity) features from a feature matrix.
+
+    Delta features capture the temporal dynamics of spectral features —
+    how the features change over time. This is critical for speech
+    recognition because phonemes are defined not just by their spectral
+    shape but by how that shape transitions (e.g., a stop consonant like
+    /b/ is characterized by a rapid spectral transition, not a static shape).
+
+    The delta is computed using a regression formula over a window of
+    ±width frames:
+
+        delta[t] = Σ_{n=1}^{width} n * (features[t+n] - features[t-n])
+                   / (2 * Σ_{n=1}^{width} n²)
+
+    This is equivalent to fitting a straight line to the features over
+    the window and taking the slope, which is more robust than a simple
+    first difference (features[t] - features[t-1]).
+
+    Standard practice is to append delta (Δ) and delta-delta (ΔΔ)
+    features to the static MFCCs, tripling the feature vector from
+    13 to 39 dimensions. The delta-delta features capture acceleration
+    — how the rate of change itself is changing.
+
+    Args:
+        features: 2D array of shape (n_features, n_frames). Each column
+            is one frame's feature vector.
+        width: Number of frames on each side for the regression window.
+            width=2 uses a 5-frame window (t-2, t-1, t, t+1, t+2).
+
+    Returns:
+        2D array of shape (n_features, n_frames) containing the delta
+        features. Edge frames are padded by repeating the nearest frame.
+
+    Raises:
+        ValueError: If width < 1 or features has fewer than 2 dimensions.
+
+    Example:
+        >>> import numpy as np
+        >>> features = np.array([[1, 2, 4, 7, 11]], dtype=np.float64)
+        >>> deltas = compute_delta_features(features, width=1)
+        >>> deltas.shape == features.shape
+        True
+        >>> deltas[0, 1]  # (4 - 1) / 2 = 1.5
+        1.5
+    """
+    if width < 1:
+        raise ValueError(f"Delta width must be >= 1, got {width}")
+    if features.ndim != 2:
+        raise ValueError(
+            f"Features must be 2D (n_features, n_frames), got shape {features.shape}"
+        )
+
+    n_features, n_frames = features.shape
+    if n_frames == 0:
+        return np.zeros_like(features)
+
+    # Pad the features at both ends by repeating edge frames
+    # This avoids boundary effects in the regression computation
+    padded = np.pad(features, ((0, 0), (width, width)), mode="edge")
+
+    # Denominator: 2 * Σ_{n=1}^{width} n²
+    denominator = 2.0 * sum(n * n for n in range(1, width + 1))
+
+    # Compute deltas using the regression formula
+    deltas = np.zeros_like(features)
+    for n in range(1, width + 1):
+        # padded[:, width+n : width+n+n_frames] = features shifted left by n
+        # padded[:, width-n : width-n+n_frames] = features shifted right by n
+        deltas += n * (
+            padded[:, width + n : width + n + n_frames]
+            - padded[:, width - n : width - n + n_frames]
+        )
+    deltas /= denominator
+
+    return deltas
+
+
+def compute_mfcc_with_deltas(
+    audio: np.ndarray,
+    sample_rate: int = SAMPLE_RATE,
+    n_mfcc: int = 13,
+    n_mels: int = 26,
+    n_fft: int = 512,
+    include_delta: bool = True,
+    include_delta_delta: bool = True,
+    delta_width: int = 2,
+) -> np.ndarray:
+    """Compute MFCCs with optional delta and delta-delta features.
+
+    This is the standard feature extraction pipeline used in most ASR
+    systems. The full 39-dimensional feature vector consists of:
+
+    - **Static MFCCs** (coefficients 0–12): Capture the spectral envelope
+      shape at each time frame — what phoneme is being produced.
+    - **Delta MFCCs** (Δ, coefficients 13–25): Capture the velocity of
+      spectral change — how the sound is transitioning between phonemes.
+    - **Delta-delta MFCCs** (ΔΔ, coefficients 26–38): Capture the
+      acceleration of spectral change — useful for detecting transient
+      events like stop consonant releases.
+
+    Research has consistently shown that adding delta and delta-delta
+    features improves ASR accuracy by 10–20% over static MFCCs alone,
+    because speech is inherently a dynamic process.
+
+    Args:
+        audio: 1D numpy array of audio samples.
+        sample_rate: Audio sample rate in Hz.
+        n_mfcc: Number of static MFCC coefficients.
+        n_mels: Number of Mel filter bank channels.
+        n_fft: FFT size in samples.
+        include_delta: Whether to append delta (Δ) features.
+        include_delta_delta: Whether to append delta-delta (ΔΔ) features.
+            Only applies if include_delta is True.
+        delta_width: Regression window width for delta computation.
+
+    Returns:
+        2D numpy array of shape (n_features, n_frames) where n_features
+        is n_mfcc * (1 + include_delta + include_delta_delta).
+        With defaults: (39, n_frames) for the full feature set.
+
+    Example:
+        >>> audio = generate_speech_like_audio(duration=1.0)
+        >>> features = compute_mfcc_with_deltas(audio)
+        >>> features.shape[0]
+        39
+        >>> static_only = compute_mfcc_with_deltas(audio, include_delta=False)
+        >>> static_only.shape[0]
+        13
+    """
+    # Compute static MFCCs
+    static_mfccs = compute_mfcc(
+        audio,
+        sample_rate=sample_rate,
+        n_mfcc=n_mfcc,
+        n_mels=n_mels,
+        n_fft=n_fft,
+    )
+
+    if not include_delta:
+        return static_mfccs
+
+    # Compute delta (velocity) features
+    delta_mfccs = compute_delta_features(static_mfccs, width=delta_width)
+    feature_stack = [static_mfccs, delta_mfccs]
+
+    if include_delta_delta:
+        # Delta-delta = delta of delta (acceleration)
+        delta_delta_mfccs = compute_delta_features(delta_mfccs, width=delta_width)
+        feature_stack.append(delta_delta_mfccs)
+
+    # Stack vertically: [static; delta; delta-delta]
+    return np.vstack(feature_stack)
+
+
 def apply_preemphasis(audio: np.ndarray, coeff: float = 0.97) -> np.ndarray:
     """Apply a first-order pre-emphasis filter to audio.
 
